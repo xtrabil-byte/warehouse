@@ -1,0 +1,98 @@
+name: CI & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. Verifikasi: install -> lint -> typecheck -> test -> build
+  # ------------------------------------------------------------------
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4   # versi pnpm dibaca dari "packageManager" di package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint, typecheck, test, build
+        run: pnpm turbo run lint typecheck test build
+        env:
+          NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+
+      - name: Simpan hasil build web (static export)
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-static
+          path: apps/web/out
+          if-no-files-found: error
+          retention-days: 7
+
+  # ------------------------------------------------------------------
+  # 2a. Deploy ke Netlify  (aktif bila repo variable DEPLOY_TARGET = netlify)
+  # ------------------------------------------------------------------
+  deploy-netlify:
+    needs: verify
+    if: github.event_name != 'pull_request' && vars.DEPLOY_TARGET == 'netlify'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-static
+          path: site
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Untuk produksi, pin versi CLI (mis. netlify-cli@<versi>) agar build reprodusibel.
+      - name: Deploy ke Netlify
+        run: npx --yes netlify-cli deploy --dir=site --prod --no-build
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+  # ------------------------------------------------------------------
+  # 2b. Deploy ke Vercel  (aktif bila repo variable DEPLOY_TARGET = vercel)
+  # ------------------------------------------------------------------
+  deploy-vercel:
+    needs: verify
+    if: github.event_name != 'pull_request' && vars.DEPLOY_TARGET == 'vercel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-static
+          path: site
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Folder statis di-upload apa adanya. Project Vercel harus: Framework Preset = Other,
+      # tanpa Build/Install Command, Root Directory dikosongkan (lihat README).
+      - name: Deploy ke Vercel
+        run: npx --yes vercel deploy site --prod --yes --token "$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
